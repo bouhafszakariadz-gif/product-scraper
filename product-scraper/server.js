@@ -9,21 +9,44 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ---------------------------------------------------------------
-// هاد الخدمة تاخد رابط منتج، تجيب صفحة الويب تاعو، وتستخرج منها:
-// العنوان، الصورة، الوصف، ومحاولة استخراج السعر.
-// تخدم بطريقة آمنة عن طريق قراءة Open Graph meta tags، اللي
-// غالبية المواقع الكبيرة (Amazon, Shein, AliExpress...) تحطها
-// فالصفحة باش تبان مليحة كي تتشارك فـ Facebook/WhatsApp.
-// ---------------------------------------------------------------
+function normalizePrice(raw) {
+  if (!raw) return null;
+  let s = raw.replace(/[^\d.,]/g, "").trim();
+  if (!s) return null;
+
+  const hasComma = s.includes(",");
+  const hasDot = s.includes(".");
+
+  if (hasComma && hasDot) {
+    const lastComma = s.lastIndexOf(",");
+    const lastDot = s.lastIndexOf(".");
+    if (lastComma > lastDot) {
+      s = s.replace(/\./g, "").replace(",", ".");
+    } else {
+      s = s.replace(/,/g, "");
+    }
+  } else if (hasComma) {
+    const parts = s.split(",");
+    if (parts[parts.length - 1].length === 2) {
+      s = parts.slice(0, -1).join("") + "." + parts[parts.length - 1];
+    } else {
+      s = s.replace(/,/g, "");
+    }
+  }
+
+  const num = parseFloat(s);
+  return isNaN(num) ? null : num;
+}
 
 function extractPrice($) {
-  // نجربو بزاف بحال باش نلقاو السعر، مواقع مختلفة تحط السعر بطرق مختلفة
   const selectors = [
     'meta[property="product:price:amount"]',
     'meta[property="og:price:amount"]',
     '[itemprop="price"]',
-    ".a-price .a-offscreen", // Amazon
+    ".a-price .a-offscreen",
+    "#priceblock_ourprice",
+    "#priceblock_dealprice",
+    ".a-price-whole",
     ".price",
     ".product-price",
   ];
@@ -32,11 +55,40 @@ function extractPrice($) {
     const el = $(sel).first();
     if (el.length) {
       const val = el.attr("content") || el.text();
-      const match = val && val.replace(/\s/g, "").match(/[\d.,]+/);
-      if (match) return match[0].replace(/,/g, "");
+      const normalized = normalizePrice(val);
+      if (normalized !== null) return normalized;
     }
   }
   return null;
+}
+
+function extractImage($, url) {
+  const ogImage = $('meta[property="og:image"]').attr("content");
+  if (ogImage) return ogImage;
+
+  const twitterImage = $('meta[name="twitter:image"]').attr("content");
+  if (twitterImage) return twitterImage;
+
+  const dynamicImg = $("#landingImage, #imgBlkFront").attr("data-a-dynamic-image");
+  if (dynamicImg) {
+    try {
+      const parsed = JSON.parse(dynamicImg);
+      const firstUrl = Object.keys(parsed)[0];
+      if (firstUrl) return firstUrl;
+    } catch (e) {}
+  }
+
+  const amazonImg = $("#landingImage, #imgBlkFront, .imgTagWrapper img").attr("src");
+  if (amazonImg) return amazonImg;
+
+  let fallback = null;
+  $("img").each((_, el) => {
+    if (fallback) return;
+    const src = $(el).attr("src");
+    const width = parseInt($(el).attr("width") || "0", 10);
+    if (src && src.startsWith("http") && width > 200) fallback = src;
+  });
+  return fallback;
 }
 
 app.post("/api/fetch-product", async (req, res) => {
@@ -49,7 +101,6 @@ app.post("/api/fetch-product", async (req, res) => {
   try {
     const response = await fetch(url, {
       headers: {
-        // نتصرفو كمتصفح عادي باش الموقع يرجعلنا الصفحة الكاملة
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
       },
@@ -68,10 +119,7 @@ app.post("/api/fetch-product", async (req, res) => {
       $("title").text() ||
       "";
 
-    const image =
-      $('meta[property="og:image"]').attr("content") ||
-      $('meta[name="twitter:image"]').attr("content") ||
-      "";
+    const image = extractImage($, url) || "";
 
     const description =
       $('meta[property="og:description"]').attr("content") ||
